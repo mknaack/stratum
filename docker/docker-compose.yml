@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      # pgx driver doesn't support SASL/SCRAM auth — use trust for dev
+      POSTGRES_HOST_AUTH_METHOD: trust
+      POSTGRES_DB: stratum
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

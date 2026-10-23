@@ -1,0 +1,12 @@
+(library
+ (name server)
+ (public_name stratum.server)
+ (libraries
+  cohttp-eio
+  http
+  uri
+  yojson
+  stratum.protocol
+  stratum.storage
+  stratum.query
+  eio))
