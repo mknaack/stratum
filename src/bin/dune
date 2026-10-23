@@ -1,0 +1,4 @@
+(executable
+ (name stratum)
+ (public_name stratum)
+ (libraries stratum.server stratum.storage eio_main uri logs logs.fmt fmt))

@@ -1,0 +1,11 @@
+(library
+ (name query)
+ (public_name stratum.query)
+ (libraries yojson)
+ (preprocess
+  (pps ppx_expect)))
+
+(ocamllex lexer)
+
+(menhir
+ (modules parser))
