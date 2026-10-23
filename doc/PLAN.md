@@ -72,13 +72,14 @@ non-blocking; change-feed waits map to `Eio.Condition`.
 ### Repo layout
 
 ```
-bin/            stratum CLI: --port --database-url [--tls-cert --tls-key]
-lib/protocol/   envelopes, system-prop injection, header helpers, error shape
-lib/storage/    caqti pool, schema migration, CRUD
-lib/query/      menhir lexer/parser → AST → Postgres SQL fragment compiler
+src/bin/        stratum CLI: --port --database-url [--tls-cert --tls-key]
+src/protocol/   envelopes, system-prop injection, header helpers, error shape
+src/storage/    caqti pool, schema migration, CRUD
+src/query/      menhir lexer/parser → AST → Postgres SQL fragment compiler
                 + in-process evaluator fallback
-lib/server/     cohttp-eio router + handlers
+src/server/     cohttp-eio router + handlers
 test/           ppx_expect
+doc/            plans and design docs
 docker/         compose: postgres:16 (+ stratum when built)
 ```
 
