@@ -1,0 +1,8 @@
+(library
+ (name test_query)
+ (wrapped false)
+ (modules test_query)
+ (libraries stratum.query yojson)
+ (inline_tests)
+ (preprocess
+  (pps ppx_expect)))

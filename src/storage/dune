@@ -1,0 +1,4 @@
+(library
+ (name storage)
+ (public_name stratum.storage)
+ (libraries caqti caqti-eio caqti-driver-pgx stratum.protocol uri yojson))
