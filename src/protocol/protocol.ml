@@ -1,27 +1,43 @@
 open Yojson.Safe.Util
+open Ppx_yojson_conv_lib.Yojson_conv
 
+(* free-form embedded JSON (indexingPolicy, partitionKey): the ppx expects a
+   yojson_of_<typename> per field type, so alias with an identity serializer *)
+type json = Yojson.Safe.t
+
+let yojson_of_json j = j
 let rng = Random.State.make_self_init ()
 let rid () = Uuidm.v4_gen rng () |> Uuidm.to_string
 let etag () = rid ()
 let now () = int_of_float (Unix.gettimeofday ())
-let etag_json e = `String ("\"" ^ e ^ "\"")
 let quote_etag e = "\"" ^ e ^ "\""
 
 let unquote_etag s =
   let n = String.length s in
   if n >= 2 && s.[0] = '"' && s.[n - 1] = '"' then String.sub s 1 (n - 2) else s
 
+type database_resource = {
+  id : string;
+  rid : string; [@key "_rid"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+  colls : string; [@key "_colls"]
+  users : string; [@key "_users"]
+  ts : int; [@key "_ts"]
+}
+[@@deriving yojson_of]
+
 let database_resource ~id ~rid ~etag ~ts =
-  `Assoc
-    [
-      ("id", `String id);
-      ("_rid", `String rid);
-      ("_self", `String ("dbs/" ^ rid ^ "/"));
-      ("_etag", etag_json etag);
-      ("_colls", `String "colls/");
-      ("_users", `String "users/");
-      ("_ts", `Int ts);
-    ]
+  yojson_of_database_resource
+    {
+      id;
+      rid;
+      self = "dbs/" ^ rid ^ "/";
+      etag = quote_etag etag;
+      colls = "colls/";
+      users = "users/";
+      ts;
+    }
 
 let default_indexing_policy =
   `Assoc
@@ -32,52 +48,80 @@ let default_indexing_policy =
       ("excludedPaths", `List []);
     ]
 
+type collection_resource = {
+  id : string;
+  indexing_policy : json; [@key "indexingPolicy"]
+  partition_key : json; [@key "partitionKey"]
+  rid : string; [@key "_rid"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+  ts : int; [@key "_ts"]
+  docs : string; [@key "_docs"]
+  sprocs : string; [@key "_sprocs"]
+  triggers : string; [@key "_triggers"]
+  udfs : string; [@key "_udfs"]
+  conflicts : string; [@key "_conflicts"]
+}
+[@@deriving yojson_of]
+
 let collection_resource ~id ~db_rid ~rid ~etag ~ts ~indexing_policy
     ~partition_key =
-  `Assoc
-    [
-      ("id", `String id);
-      ( "indexingPolicy",
-        Option.value indexing_policy ~default:default_indexing_policy );
-      ( "partitionKey",
-        partition_key |> Option.value ~default:(`Assoc [ ("paths", `List []) ])
-      );
-      ("_rid", `String rid);
-      ("_self", `String ("dbs/" ^ db_rid ^ "/colls/" ^ rid ^ "/"));
-      ("_etag", etag_json etag);
-      ("_ts", `Int ts);
-      ("_docs", `String "docs/");
-      ("_sprocs", `String "sprocs/");
-      ("_triggers", `String "triggers/");
-      ("_udfs", `String "udfs/");
-      ("_conflicts", `String "conflicts/");
-    ]
+  yojson_of_collection_resource
+    {
+      id;
+      indexing_policy =
+        Option.value indexing_policy ~default:default_indexing_policy;
+      partition_key =
+        partition_key |> Option.value ~default:(`Assoc [ ("paths", `List []) ]);
+      rid;
+      self = "dbs/" ^ db_rid ^ "/colls/" ^ rid ^ "/";
+      etag = quote_etag etag;
+      ts;
+      docs = "docs/";
+      sprocs = "sprocs/";
+      triggers = "triggers/";
+      udfs = "udfs/";
+      conflicts = "conflicts/";
+    }
+
+type partition_key_result = {
+  paths : string list;
+  kind : string;
+  version : int;
+}
+[@@deriving yojson_of]
 
 let partition_key_result_of_paths paths =
-  `Assoc
-    [
-      ("paths", `List (List.map (fun p -> `String p) paths));
-      ("kind", `String "Hash");
-      ("version", `Int 2);
-    ]
+  yojson_of_partition_key_result { paths; kind = "Hash"; version = 2 }
 
-let doc_meta ~db_rid ~coll_rid ~doc_rid ~etag ~ts =
-  [
-    ("_rid", `String doc_rid);
-    ( "_self",
-      `String ("dbs/" ^ db_rid ^ "/colls/" ^ coll_rid ^ "/docs/" ^ doc_rid ^ "/")
-    );
-    ("_etag", etag_json etag);
-    ("_ts", `Int ts);
-    ("_attachments", `String "attachments/");
-  ]
+type doc_meta = {
+  rid : string; [@key "_rid"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+  ts : int; [@key "_ts"]
+  attachments : string; [@key "_attachments"]
+}
+[@@deriving yojson_of]
+
+let doc_meta_json ~db_rid ~coll_rid ~doc_rid ~etag ~ts =
+  yojson_of_doc_meta
+    {
+      rid = doc_rid;
+      self = "dbs/" ^ db_rid ^ "/colls/" ^ coll_rid ^ "/docs/" ^ doc_rid ^ "/";
+      etag = quote_etag etag;
+      ts;
+      attachments = "attachments/";
+    }
 
 let inject_doc_meta ~db_rid ~coll_rid ~doc_rid ~etag ~ts = function
-  | `Assoc fields ->
-      let meta = doc_meta ~db_rid ~coll_rid ~doc_rid ~etag ~ts in
-      `Assoc (fields @ meta)
+  | `Assoc fields -> (
+      match doc_meta_json ~db_rid ~coll_rid ~doc_rid ~etag ~ts with
+      | `Assoc meta -> `Assoc (fields @ meta)
+      | _ -> `Assoc fields)
   | other -> other
 
+(* the member key varies per resource kind (Databases, Documents, ...), so a
+   fixed record type does not fit — build the envelope as an assoc list *)
 let feed ~rid ~member items =
   `Assoc
     [
@@ -86,8 +130,9 @@ let feed ~rid ~member items =
       ("_count", `Int (List.length items));
     ]
 
-let error_json ~code ~message =
-  `Assoc [ ("code", `String code); ("message", `String message) ]
+type error_body = { code : string; message : string } [@@deriving yojson_of]
+
+let error_json ~code ~message = yojson_of_error_body { code; message }
 
 let member_opt name json =
   match member name json with `Null -> None | v -> Some v
@@ -123,25 +168,30 @@ let pk_of_doc pk_path doc =
   | Some j -> Some (pk_value_string j)
   | None -> None
 
+type pkrange = {
+  id : string;
+  min_inclusive : string; [@key "minInclusive"]
+  max_exclusive : string; [@key "maxExclusive"]
+  rid : string; [@key "_rid"]
+  ts : int; [@key "_ts"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+}
+[@@deriving yojson_of]
+
 let pkranges ~coll_rid =
-  `Assoc
+  feed ~rid:coll_rid ~member:"PartitionKeyRanges"
     [
-      ("_rid", `String coll_rid);
-      ( "PartitionKeyRanges",
-        `List
-          [
-            `Assoc
-              [
-                ("id", `String "0");
-                ("minInclusive", `String "");
-                ("maxExclusive", `String "FF");
-                ("_rid", `String "0");
-                ("_ts", `Int (now ()));
-                ("_self", `String "");
-                ("_etag", etag_json "0");
-              ];
-          ] );
-      ("_count", `Int 1);
+      yojson_of_pkrange
+        {
+          id = "0";
+          min_inclusive = "";
+          max_exclusive = "FF";
+          rid = "0";
+          ts = now ();
+          self = "";
+          etag = "\"0\"";
+        };
     ]
 
 let continuation_of_lsn lsn = Base64.encode_exn (Int64.to_string lsn)

@@ -20,6 +20,7 @@
   caqti-eio
   caqti-driver-pgx
   yojson
+  ppx_yojson_conv
   uuidm
   base64
   ptime
