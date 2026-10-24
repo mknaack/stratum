@@ -272,3 +272,42 @@ let parse s =
       let pos = Lexing.lexeme_start_p lexbuf in
       error "parse error at character %d near '%s'" pos.pos_cnum
         (Lexing.lexeme lexbuf)
+
+(* --- PATCH support --- *)
+
+type patch_op = { op : string; path : string; value : Yojson.Safe.t option }
+
+let path_segs p =
+  match String.split_on_char '/' p with "" :: segs -> segs | segs -> segs
+
+(* doc := <expr> where expr is a jsonb_set/#- chain over `doc` *)
+let patch_set ops =
+  List.fold_left
+    (fun inner (o : patch_op) ->
+      let segs = path_segs o.path in
+      let p = jsonb_path_lit segs in
+      match (o.op, o.value) with
+      | ("set" | "add" | "replace"), Some v ->
+          "jsonb_set(" ^ inner ^ ", " ^ p ^ ", " ^ jsonb_lit v ^ ", true)"
+      | "remove", _ -> "(" ^ inner ^ " #- " ^ p ^ ")"
+      | "incr", Some ((`Int _ | `Float _ | `Intlit _) as v) ->
+          "jsonb_set(" ^ inner ^ ", " ^ p ^ ", to_jsonb(COALESCE((" ^ inner
+          ^ " #>> " ^ p ^ ")::numeric, 0) + " ^ Yojson.Safe.to_string v
+          ^ "::numeric))"
+      | "incr", _ -> error "incr requires a numeric value"
+      | ("set" | "add" | "replace"), None -> error "%s requires a value" o.op
+      | name, _ -> error "unsupported patch op %s" name)
+    "doc" ops
+
+(* overwrite a top-level field — used to bump _etag/_ts after a patch *)
+let set_field inner name v =
+  "jsonb_set(" ^ inner ^ ", " ^ jsonb_path_lit [ name ] ^ ", " ^ jsonb_lit v
+  ^ ", true)"
+
+(* PATCH `condition`: "from c where <pred>" — parse as a whole query and
+   keep only the WHERE fragment *)
+let compile_where s =
+  let q = parse ("SELECT * " ^ s) in
+  match q.where with
+  | None -> error "condition has no WHERE clause"
+  | Some e -> where_expr ~alias:q.alias ~params:[] e

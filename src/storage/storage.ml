@@ -12,6 +12,21 @@ let with_conn pool f =
       f (module Db : Caqti_eio.CONNECTION))
     pool
 
+(* run f on one connection inside a transaction; rollback on Error or
+   exception (re-raised), commit on Ok *)
+let with_txn pool f =
+  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+  match Db.start () with
+  | Error _ as e -> e
+  | Ok () -> (
+      try
+        match f (module Db : Caqti_eio.CONNECTION) with
+        | Ok v -> ( match Db.commit () with Ok () -> Ok v | Error _ as e -> e)
+        | Error _ as e -> ( match Db.rollback () with _ -> e)
+      with e ->
+        ignore (Db.rollback ());
+        raise e)
+
 let migrate pool =
   with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
   let exec s = Db.exec (direct T.(unit -->. unit) s) () in
@@ -126,8 +141,8 @@ let coll_delete pool ~db ~coll =
 
 (* --- documents --- *)
 
-let doc_create pool ~db ~coll ~id ~pk ~doc ~upsert =
-  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+let doc_create_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk ~doc
+    ~upsert =
   let sql =
     "INSERT INTO docs (db, coll, id, pk, doc) VALUES (?, ?, ?, ?, ?::jsonb) "
     ^ (if upsert then
@@ -146,8 +161,11 @@ let doc_create pool ~db ~coll ~id ~pk ~doc ~upsert =
     | Some doc -> `Ok (json_of_text doc)
     | None -> `Conflict)
 
-let doc_get pool ~db ~coll ~id =
-  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+let doc_create pool ~db ~coll ~id ~pk ~doc ~upsert =
+  with_conn pool @@ fun conn ->
+  doc_create_conn conn ~db ~coll ~id ~pk ~doc ~upsert
+
+let doc_get_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id =
   let req =
     direct
       T.(t3 string string string -->? string)
@@ -155,8 +173,10 @@ let doc_get pool ~db ~coll ~id =
   in
   Db.find_opt req (db, coll, id) |> Result.map (Option.map json_of_text)
 
-let doc_replace pool ~db ~coll ~id ~pk ~doc =
-  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+let doc_get pool ~db ~coll ~id =
+  with_conn pool @@ fun conn -> doc_get_conn conn ~db ~coll ~id
+
+let doc_replace_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk ~doc =
   let req =
     direct
       T.(t2 (t2 string (option string)) (t3 string string string) -->? string)
@@ -166,10 +186,13 @@ let doc_replace pool ~db ~coll ~id ~pk ~doc =
   Db.find_opt req ((Yojson.Safe.to_string doc, pk), (db, coll, id))
   |> Result.map (Option.map json_of_text)
 
+let doc_replace pool ~db ~coll ~id ~pk ~doc =
+  with_conn pool @@ fun conn -> doc_replace_conn conn ~db ~coll ~id ~pk ~doc
+
 (* pk: (header pk option, header pk option) — second slot drives
    "(? IS NULL OR pk = ?)" so an absent header skips the pk check *)
-let doc_delete pool ~db ~coll ~id ~pk_header =
-  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+let doc_delete_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk_header
+    =
   let req =
     direct
       T.(
@@ -181,16 +204,46 @@ let doc_delete pool ~db ~coll ~id ~pk_header =
   Db.find_opt req ((db, coll, id), (pk_header, pk_header))
   |> Result.map Option.is_some
 
-(* rows of (lsn, doc) after a cursor, capped to fetch *)
-let doc_list pool ~db ~coll ~after ~fetch =
+let doc_delete pool ~db ~coll ~id ~pk_header =
+  with_conn pool @@ fun conn -> doc_delete_conn conn ~db ~coll ~id ~pk_header
+
+(* set_sql is a composed jsonb expression (jsonb_set/#- over `doc`);
+   cond_sql is an optional WHERE fragment for the PATCH `condition` *)
+let doc_patch_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk_header
+    ~set_sql ~cond_sql =
+  let sql =
+    "UPDATE docs SET doc = " ^ set_sql
+    ^ " WHERE db = ? AND coll = ? AND id = ? AND (? IS NULL OR pk = ?)"
+    ^ (match cond_sql with None -> "" | Some c -> " AND (" ^ c ^ ")")
+    ^ " RETURNING doc::text"
+  in
+  let req =
+    direct
+      T.(
+        t2 (t3 string string string) (t2 (option string) (option string))
+        -->? string)
+      sql
+  in
+  Db.find_opt req ((db, coll, id), (pk_header, pk_header))
+  |> Result.map (Option.map json_of_text)
+
+let doc_patch pool ~db ~coll ~id ~pk_header ~set_sql ~cond_sql =
+  with_conn pool @@ fun conn ->
+  doc_patch_conn conn ~db ~coll ~id ~pk_header ~set_sql ~cond_sql
+
+(* rows of (lsn, doc) after a cursor, capped to fetch; `since` bounds
+   doc->_ts for If-Modified-Since *)
+let doc_list pool ~db ~coll ~after ~fetch ?(since = None) () =
   with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
   let req =
     direct
-      T.(t2 (t2 string string) (t2 int64 int) -->* t2 int64 string)
+      T.(
+        t3 (t2 string string) (t3 int64 (option int64) (option int64)) int
+        -->* t2 int64 string)
       "SELECT lsn, doc::text FROM docs WHERE db = ? AND coll = ? AND lsn > ? \
-       ORDER BY lsn LIMIT ?"
+       AND (? IS NULL OR (doc->>'_ts')::bigint >= ?) ORDER BY lsn LIMIT ?"
   in
-  Db.collect_list req ((db, coll), (after, fetch))
+  Db.collect_list req ((db, coll), (after, since, since), fetch)
   |> Result.map (List.map (fun (lsn, d) -> (lsn, json_of_text d)))
 
 (* ad-hoc query: sql built by Query.Compile; one jsonb-text column out *)
