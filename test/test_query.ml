@@ -51,3 +51,20 @@ let%expect_test "parse error" =
   (try ignore (Compile.parse "SELECT FROM")
    with Compile.Error e -> print_string e);
   [%expect {| parse error at character 7 near 'FROM' |}]
+
+let%expect_test "patch_set: set + incr + remove" =
+  let ops =
+    [
+      { Compile.op = "set"; path = "/city"; value = Some (`String "CPH") };
+      { Compile.op = "incr"; path = "/n"; value = Some (`Int 2) };
+      { Compile.op = "remove"; path = "/old"; value = None };
+    ]
+  in
+  print_string (Compile.patch_set ops);
+  [%expect
+    {| (jsonb_set(jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true), '{"n"}', to_jsonb(COALESCE((jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true) #>> '{"n"}')::numeric, 0) + 2::numeric)) #- '{"old"}') |}]
+
+let%expect_test "compile_where: patch condition" =
+  print_string
+    (Compile.compile_where "from c where c.n > 5 and IS_DEFINED(c.x)");
+  [%expect {| ((doc #> '{"n"}' > '5'::jsonb) AND jsonb_exists(doc, '$.x')) |}]

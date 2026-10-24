@@ -198,3 +198,50 @@ let continuation_of_lsn lsn = Base64.encode_exn (Int64.to_string lsn)
 
 let lsn_of_continuation s =
   match Base64.decode s with Ok s -> Int64.of_string_opt s | Error _ -> None
+
+type batch_result = {
+  status_code : int; [@key "statusCode"]
+  request_charge : float; [@key "requestCharge"]
+  e_tag : string option; [@key "eTag"]
+  resource_body : json; [@key "resourceBody"]
+}
+[@@deriving yojson_of]
+
+(* "Fri, 23 Oct 2026 20:49:00 GMT" → epoch seconds for If-Modified-Since *)
+let months =
+  [|
+    "Jan";
+    "Feb";
+    "Mar";
+    "Apr";
+    "May";
+    "Jun";
+    "Jul";
+    "Aug";
+    "Sep";
+    "Oct";
+    "Nov";
+    "Dec";
+  |]
+
+let http_date_to_epoch s =
+  let ( let* ) = Option.bind in
+  match String.split_on_char ' ' (String.trim s) with
+  | [ _dow; dom; mon; year; hms; _tz ] -> (
+      let* dom = int_of_string_opt dom in
+      let* year = int_of_string_opt year in
+      let* mo =
+        match List.find_index (String.equal mon) (Array.to_list months) with
+        | Some i -> Some (i + 1)
+        | None -> None
+      in
+      match String.split_on_char ':' hms with
+      | [ h; m; sec ] ->
+          let* h = int_of_string_opt h in
+          let* m = int_of_string_opt m in
+          let* sec = int_of_string_opt sec in
+          let open Ptime in
+          of_date_time ((year, mo, dom), ((h, m, sec), 0))
+          |> Option.map (fun p -> Int64.of_float (to_float_s p))
+      | _ -> None)
+  | _ -> None
