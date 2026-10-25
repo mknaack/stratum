@@ -3,6 +3,7 @@
     "dockerComposeFile": "docker-compose.yml",
     "service": "app",
     "workspaceFolder": "/workspaces/stratum",
+    "remoteUser": "opam",
     "customizations": {
         "extensions": [
             "ocamllabs.ocaml-platform",

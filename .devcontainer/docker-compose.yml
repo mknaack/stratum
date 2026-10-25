@@ -4,6 +4,7 @@
 services:
   app:
     image: ocaml/opam:debian-12-ocaml-5.3
+    user: opam
     command: sleep infinity
     volumes:
       - ..:/workspaces/stratum:cached
