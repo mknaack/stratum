@@ -16,9 +16,12 @@
   eio
   eio_main
   cohttp-eio
-  caqti
-  caqti-eio
-  caqti-driver-pgx
+  (caqti
+   (>= 3.0))
+  (caqti-eio
+   (>= 3.0))
+  (caqti-driver-pgx
+   (>= 3.0))
   yojson
   ppx_yojson_conv
   uuidm
