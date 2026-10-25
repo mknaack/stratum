@@ -275,7 +275,24 @@ let parse s =
 
 (* --- PATCH support --- *)
 
-type patch_op = { op : string; path : string; value : Yojson.Safe.t option }
+type patch_kind = Set | Add | Replace | Remove | Incr
+
+let patch_kind_of_string = function
+  | "set" -> Some Set
+  | "add" -> Some Add
+  | "replace" -> Some Replace
+  | "remove" -> Some Remove
+  | "incr" -> Some Incr
+  | _ -> None
+
+let string_of_patch_kind = function
+  | Set -> "set"
+  | Add -> "add"
+  | Replace -> "replace"
+  | Remove -> "remove"
+  | Incr -> "incr"
+
+type patch_op = { op : patch_kind; path : string; value : Yojson.Safe.t option }
 
 let path_segs p =
   match String.split_on_char '/' p with "" :: segs -> segs | segs -> segs
@@ -287,16 +304,16 @@ let patch_set ops =
       let segs = path_segs o.path in
       let p = jsonb_path_lit segs in
       match (o.op, o.value) with
-      | ("set" | "add" | "replace"), Some v ->
+      | (Set | Add | Replace), Some v ->
           "jsonb_set(" ^ inner ^ ", " ^ p ^ ", " ^ jsonb_lit v ^ ", true)"
-      | "remove", _ -> "(" ^ inner ^ " #- " ^ p ^ ")"
-      | "incr", Some ((`Int _ | `Float _ | `Intlit _) as v) ->
+      | Remove, _ -> "(" ^ inner ^ " #- " ^ p ^ ")"
+      | Incr, Some ((`Int _ | `Float _ | `Intlit _) as v) ->
           "jsonb_set(" ^ inner ^ ", " ^ p ^ ", to_jsonb(COALESCE((" ^ inner
           ^ " #>> " ^ p ^ ")::numeric, 0) + " ^ Yojson.Safe.to_string v
           ^ "::numeric))"
-      | "incr", _ -> error "incr requires a numeric value"
-      | ("set" | "add" | "replace"), None -> error "%s requires a value" o.op
-      | name, _ -> error "unsupported patch op %s" name)
+      | Incr, _ -> error "incr requires a numeric value"
+      | (Set | Add | Replace), None ->
+          error "%s requires a value" (string_of_patch_kind o.op))
     "doc" ops
 
 (* overwrite a top-level field — used to bump _etag/_ts after a patch *)
