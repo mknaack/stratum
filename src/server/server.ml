@@ -338,19 +338,26 @@ let change_feed pool db coll req =
             (Protocol.feed ~rid:(coll_rid_of resource) ~member:"Documents"
                (List.map snd page)))
 
+let patch_op_of_json o =
+  let s = member "op" o |> to_string in
+  let op =
+    match Query.Compile.patch_kind_of_string s with
+    | Some k -> k
+    | None -> Query.Compile.error "unsupported patch op %s" s
+  in
+  {
+    Query.Compile.op;
+    path = member "path" o |> to_string;
+    value = Protocol.member_opt "value" o;
+  }
+
 let patch_doc pool db coll id req body =
   require_coll pool db coll @@ fun ~pk_path:_ ~resource:_ ->
   match parse_body body with
   | Error r -> r
   | Ok json -> (
       let ops =
-        member "operations" json |> to_list
-        |> List.map (fun o ->
-            {
-              Query.Compile.op = member "op" o |> to_string;
-              path = member "path" o |> to_string;
-              value = Protocol.member_opt "value" o;
-            })
+        member "operations" json |> to_list |> List.map patch_op_of_json
       in
       match ops with
       | [] -> bad_request "PATCH requires at least one operation"
@@ -384,6 +391,17 @@ let patch_doc pool db coll id req body =
           with Query.Compile.Error e -> bad_request e))
 
 exception Batch_abort of (Cohttp_eio.Server.writer -> unit)
+
+type batch_op = Create | Upsert | Replace | Delete | Read | Patch
+
+let batch_op_of_string = function
+  | "Create" -> Some Create
+  | "Upsert" -> Some Upsert
+  | "Replace" -> Some Replace
+  | "Delete" -> Some Delete
+  | "Read" -> Some Read
+  | "Patch" -> Some Patch
+  | _ -> None
 
 (* x-ms-cosmos-batch-atomic: every op in one Postgres transaction; the whole
    batch rolls back on the first failure *)
@@ -443,11 +461,12 @@ let batch_docs pool db coll _req body =
                         | _ -> false)
                   in
                   let run_op conn o =
-                    let ty = member "operationType" o |> to_string in
                     let rbody = member "resourceBody" o in
                     let rid_opt = member "resourceId" o |> to_string_option in
-                    match ty with
-                    | "Create" | "Upsert" -> (
+                    match
+                      batch_op_of_string (member "operationType" o |> to_string)
+                    with
+                    | Some ((Create | Upsert) as ty) -> (
                         let id = member "id" rbody |> to_string in
                         let doc =
                           Protocol.inject_doc_meta ~db_rid ~coll_rid
@@ -456,7 +475,7 @@ let batch_docs pool db coll _req body =
                         in
                         match
                           Storage.doc_create_conn conn ~db ~coll ~id
-                            ~pk:(pk_of_body rbody) ~doc ~upsert:(ty = "Upsert")
+                            ~pk:(pk_of_body rbody) ~doc ~upsert:(ty = Upsert)
                         with
                         | Ok (`Ok doc) ->
                             let et = doc |> member "_etag" |> to_string in
@@ -466,7 +485,7 @@ let batch_docs pool db coll _req body =
                               (conflict
                                  (Printf.sprintf "Document %s already exists" id))
                         | Error e -> abort (db_error e))
-                    | "Replace" -> (
+                    | Some Replace -> (
                         let id =
                           match rid_opt with
                           | Some id -> id
@@ -493,7 +512,7 @@ let batch_docs pool db coll _req body =
                                 (not_found
                                    (Printf.sprintf "Document %s not found" id))
                           | Error e -> abort (db_error e))
-                    | "Delete" -> (
+                    | Some Delete -> (
                         let id =
                           match rid_opt with
                           | Some id -> id
@@ -513,7 +532,7 @@ let batch_docs pool db coll _req body =
                                 (not_found
                                    (Printf.sprintf "Document %s not found" id))
                           | Error e -> abort (db_error e))
-                    | "Read" -> (
+                    | Some Read -> (
                         let id =
                           match rid_opt with
                           | Some id -> id
@@ -528,7 +547,7 @@ let batch_docs pool db coll _req body =
                               (not_found
                                  (Printf.sprintf "Document %s not found" id))
                         | Error e -> abort (db_error e))
-                    | "Patch" -> (
+                    | Some Patch -> (
                         let id =
                           match rid_opt with
                           | Some id -> id
@@ -539,12 +558,7 @@ let batch_docs pool db coll _req body =
                         else
                           let pops =
                             member "operations" rbody |> to_list
-                            |> List.map (fun p ->
-                                {
-                                  Query.Compile.op = member "op" p |> to_string;
-                                  path = member "path" p |> to_string;
-                                  value = Protocol.member_opt "value" p;
-                                })
+                            |> List.map patch_op_of_json
                           in
                           let set_sql = Query.Compile.patch_set pops in
                           let cond_sql =
@@ -564,9 +578,11 @@ let batch_docs pool db coll _req body =
                                 (precondition_failed
                                    "PATCH condition evaluated to false")
                           | Error e -> abort (db_error e))
-                    | other ->
+                    | None ->
                         abort
-                          (bad_request ("unsupported batch operation " ^ other))
+                          (bad_request
+                             ("unsupported batch operation "
+                             ^ (member "operationType" o |> to_string)))
                   in
                   try
                     match
@@ -660,13 +676,15 @@ let handle pool req body_reader =
     Uri.path uri |> String.split_on_char '/' |> List.filter (fun s -> s <> "")
   in
   let meth = Http.Request.meth req in
-  (* only read bodies for methods that carry them; cohttp-eio reports
-     `Unknown` body for DELETE without Content-Length and a lazy read
-     can wedge the connection *)
+  (* only read declared bodies; cohttp-eio reports an `Unknown` body when
+     Content-Length/Transfer-Encoding are absent and a lazy read can
+     wedge the connection *)
   let body =
     match meth with
-    | `POST | `PUT | `PATCH ->
-        Eio.Buf_read.(of_flow ~max_size:max_int body_reader |> take_all)
+    | `POST | `PUT | `PATCH -> (
+        match (header req "content-length", header req "transfer-encoding") with
+        | None, None -> ""
+        | _ -> Eio.Buf_read.(of_flow ~max_size:max_int body_reader |> take_all))
     | _ -> ""
   in
   try

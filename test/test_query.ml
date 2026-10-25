@@ -55,9 +55,9 @@ let%expect_test "parse error" =
 let%expect_test "patch_set: set + incr + remove" =
   let ops =
     [
-      { Compile.op = "set"; path = "/city"; value = Some (`String "CPH") };
-      { Compile.op = "incr"; path = "/n"; value = Some (`Int 2) };
-      { Compile.op = "remove"; path = "/old"; value = None };
+      { Compile.op = Compile.Set; path = "/city"; value = Some (`String "CPH") };
+      { Compile.op = Compile.Incr; path = "/n"; value = Some (`Int 2) };
+      { Compile.op = Compile.Remove; path = "/old"; value = None };
     ]
   in
   print_string (Compile.patch_set ops);
