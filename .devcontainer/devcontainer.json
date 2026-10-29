@@ -1,0 +1,20 @@
+{
+    "name": "stratum",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "app",
+    "workspaceFolder": "/workspaces/stratum",
+    "remoteUser": "opam",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "ocamllabs.ocaml-platform",
+                "mutantdino.resourcemonitor"
+            ]
+        }
+    },
+    "mounts": [
+        "source=${localEnv:HOME}/.gitconfig,target=/home/opam/.gitconfig,type=bind,consistency=cached"
+    ],
+    "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libgmp-dev libssl-dev zlib1g-dev libev-dev pkg-config && opam repository set-url default https://opam.ocaml.org && opam update && opam install ocaml-lsp-server ocamlformat.0.28.1 && opam install . --deps-only --with-test",
+    "postStartCommand": "eval $(opam env)"
+}
