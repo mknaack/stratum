@@ -147,18 +147,20 @@ let doc_create_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk ~doc
     "INSERT INTO docs (db, coll, id, pk, doc) VALUES (?, ?, ?, ?, ?::jsonb) "
     ^ (if upsert then
          "ON CONFLICT (db, coll, id) DO UPDATE SET doc = EXCLUDED.doc, pk = \
-          EXCLUDED.pk "
+          EXCLUDED.pk, lsn = nextval('docs_lsn_seq') "
        else "ON CONFLICT (db, coll, id) DO NOTHING ")
-    ^ "RETURNING doc::text"
+    ^ "RETURNING doc::text, (xmax = 0)"
   in
   let req =
     direct
-      T.(t2 (t3 string string string) (t2 (option string) string) -->? string)
+      T.(
+        t2 (t3 string string string) (t2 (option string) string)
+        -->? t2 string bool)
       sql
   in
   Db.find_opt req ((db, coll, id), (pk, Yojson.Safe.to_string doc))
   |> Result.map (function
-    | Some doc -> `Ok (json_of_text doc)
+    | Some (doc, inserted) -> `Ok (json_of_text doc, inserted)
     | None -> `Conflict)
 
 let doc_create pool ~db ~coll ~id ~pk ~doc ~upsert =
@@ -180,8 +182,8 @@ let doc_replace_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk ~doc =
   let req =
     direct
       T.(t2 (t2 string (option string)) (t3 string string string) -->? string)
-      "UPDATE docs SET doc = ?::jsonb, pk = ? WHERE db = ? AND coll = ? AND id \
-       = ? RETURNING doc::text"
+      "UPDATE docs SET doc = ?::jsonb, pk = ?, lsn = nextval('docs_lsn_seq') \
+       WHERE db = ? AND coll = ? AND id = ? RETURNING doc::text"
   in
   Db.find_opt req ((Yojson.Safe.to_string doc, pk), (db, coll, id))
   |> Result.map (Option.map json_of_text)
@@ -213,7 +215,8 @@ let doc_patch_conn (module Db : Caqti_eio.CONNECTION) ~db ~coll ~id ~pk_header
     ~set_sql ~cond_sql =
   let sql =
     "UPDATE docs SET doc = " ^ set_sql
-    ^ " WHERE db = ? AND coll = ? AND id = ? AND (? IS NULL OR pk = ?)"
+    ^ ", lsn = nextval('docs_lsn_seq') WHERE db = ? AND coll = ? AND id = ? \
+       AND (? IS NULL OR pk = ?)"
     ^ (match cond_sql with None -> "" | Some c -> " AND (" ^ c ^ ")")
     ^ " RETURNING doc::text"
   in
@@ -232,19 +235,33 @@ let doc_patch pool ~db ~coll ~id ~pk_header ~set_sql ~cond_sql =
   doc_patch_conn conn ~db ~coll ~id ~pk_header ~set_sql ~cond_sql
 
 (* rows of (lsn, doc) after a cursor, capped to fetch; `since` bounds
-   doc->_ts for If-Modified-Since *)
-let doc_list pool ~db ~coll ~after ~fetch ?(since = None) () =
+   doc->_ts for If-Modified-Since; `pk` scopes to one partition key *)
+let doc_list pool ~db ~coll ~after ~fetch ?(since = None) ?(pk = None) () =
   with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
   let req =
     direct
       T.(
-        t3 (t2 string string) (t3 int64 (option int64) (option int64)) int
+        t3 (t2 string string)
+          (t5 int64 (option int64) (option int64) (option string)
+             (option string))
+          int
         -->* t2 int64 string)
       "SELECT lsn, doc::text FROM docs WHERE db = ? AND coll = ? AND lsn > ? \
-       AND (? IS NULL OR (doc->>'_ts')::bigint >= ?) ORDER BY lsn LIMIT ?"
+       AND (? IS NULL OR (doc->>'_ts')::bigint >= ?) AND (? IS NULL OR pk = ?) \
+       ORDER BY lsn LIMIT ?"
   in
-  Db.collect_list req ((db, coll), (after, since, since), fetch)
+  Db.collect_list req ((db, coll), (after, since, since, pk, pk), fetch)
   |> Result.map (List.map (fun (lsn, d) -> (lsn, json_of_text d)))
+
+(* newest lsn in a collection; the "from now" change-feed checkpoint *)
+let doc_max_lsn pool ~db ~coll =
+  with_conn pool @@ fun (module Db : Caqti_eio.CONNECTION) ->
+  let req =
+    direct
+      T.(t2 string string -->! int64)
+      "SELECT COALESCE(MAX(lsn), 0) FROM docs WHERE db = ? AND coll = ?"
+  in
+  Db.find req (db, coll)
 
 (* ad-hoc query: sql built by Query.Compile; one jsonb-text column out *)
 let doc_query pool ~db ~coll ~sql =
