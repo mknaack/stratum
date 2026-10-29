@@ -209,20 +209,88 @@ type batch_result = {
 }
 [@@deriving yojson_of]
 
+type user_resource = {
+  id : string;
+  rid : string; [@key "_rid"]
+  ts : int; [@key "_ts"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+  permissions : string; [@key "_permissions"]
+}
+[@@deriving yojson_of]
+
+type permission_resource = {
+  id : string;
+  permission_mode : string; [@key "permissionMode"]
+  resource : string;
+  rid : string; [@key "_rid"]
+  ts : int; [@key "_ts"]
+  self : string; [@key "_self"]
+  etag : string; [@key "_etag"]
+  token : string; [@key "_token"]
+}
+[@@deriving yojson_of]
+
+let permission ~id ~mode ~resource ~db_rid ~user_rid ~perm_rid ~etag ~ts =
+  yojson_of_permission_resource
+    {
+      id;
+      permission_mode = mode;
+      resource;
+      rid = perm_rid;
+      ts;
+      self =
+        "dbs/" ^ db_rid ^ "/users/" ^ user_rid ^ "/permissions/" ^ perm_rid
+        ^ "/";
+      etag;
+      (* self-contained token: the sig carries the grant (mode | resource |
+         nonce); the server decodes it on the authorization header instead of
+         looking the permission up *)
+      token =
+        "type=resource&ver=1&sig="
+        ^ Base64.encode_exn (mode ^ "|" ^ resource ^ "|" ^ perm_rid);
+    }
+
+(* offers minted per collection; queried via SELECT * FROM c WHERE
+   c.offerResourceId = @rid *)
+let offer ~rid ~resource ~offer_resource_id ~throughput ~etag ~ts =
+  `Assoc
+    [
+      ("id", `String rid);
+      ("offerVersion", `String "V2");
+      ("offerType", `String "Invalid");
+      ("offerResourceId", `String offer_resource_id);
+      ("resource", `String resource);
+      ("content", `Assoc [ ("offerThroughput", `Int throughput) ]);
+      ("_rid", `String rid);
+      ("_self", `String ("offers/" ^ rid ^ "/"));
+      ("_etag", `String etag);
+      ("_ts", `Int ts);
+    ]
+
 (* a single entry of a transactional-batch request's "operations" array *)
 type batch_operation = {
   operation_type : Batch_op.t;
   resource_body : json;
   resource_id : string option;
   if_match : string option;
+  if_none_match : string option;
+  from_ : string option;
+  value : json option;
 }
 
 let batch_operation_of_yojson j =
   {
     operation_type = Batch_op.t_of_yojson (member "operationType" j);
     resource_body = member "resourceBody" j;
-    resource_id = member "resourceId" j |> to_string_option;
+    resource_id =
+      (match member "id" j |> to_string_option with
+      | Some _ as s -> s
+      | None -> member "resourceId" j |> to_string_option);
     if_match = member "ifMatch" j |> to_string_option;
+    if_none_match = member "ifNoneMatch" j |> to_string_option;
+    from_ = member "from" j |> to_string_option;
+    value = member_opt "value" j;
   }
 
 (* "Fri, 23 Oct 2026 20:49:00 GMT" → epoch seconds for If-Modified-Since *)

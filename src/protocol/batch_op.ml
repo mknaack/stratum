@@ -16,9 +16,8 @@ let t_of_yojson j =
       | Some t -> t
       | None ->
           raise
-            (Yojson.Safe.Util.Type_error
-               ("unsupported batch operation " ^ s, j)))
+            (Yojson.Safe.Util.Type_error ("unsupported batch operation " ^ s, j))
+      )
   | _ ->
       raise
-        (Yojson.Safe.Util.Type_error
-           ("batch operationType must be a string", j))
+        (Yojson.Safe.Util.Type_error ("batch operationType must be a string", j))

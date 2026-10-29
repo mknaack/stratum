@@ -65,6 +65,5 @@ let%expect_test "patch_set: set + incr + remove" =
     {| (jsonb_set(jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true), '{"n"}', to_jsonb(COALESCE((jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true) #>> '{"n"}')::numeric, 0) + 2::numeric)) #- '{"old"}') |}]
 
 let%expect_test "compile_where: patch condition" =
-  print_string
-    (Patch.compile_where "from c where c.n > 5 and IS_DEFINED(c.x)");
+  print_string (Patch.compile_where "from c where c.n > 5 and IS_DEFINED(c.x)");
   [%expect {| ((doc #> '{"n"}' > '5'::jsonb) AND jsonb_exists(doc, '$.x')) |}]

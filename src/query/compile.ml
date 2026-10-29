@@ -228,13 +228,8 @@ let select_sql ~alias ~params = function
       in
       "jsonb_build_object(" ^ String.concat ", " pairs ^ ")"
 
-let compile ~params ~fetch ~offset (q : t) : string =
+let compile_select ~params ~fetch ~offset ~wh (q : t) : string =
   let sel = select_sql ~alias:q.alias ~params q.select in
-  let wh =
-    match q.where with
-    | None -> []
-    | Some e -> [ "AND " ^ where_expr ~alias:q.alias ~params e ]
-  in
   let ord =
     match q.order_by with
     | [] -> [ "ORDER BY lsn" ]
@@ -264,6 +259,19 @@ let compile ~params ~fetch ~offset (q : t) : string =
         "OFFSET " ^ string_of_int (offset + q.offset);
       ])
 
+let compile ~params ~fetch ~offset (q : t) : string =
+  let wh =
+    match q.where with
+    | None -> []
+    | Some e -> [ "AND " ^ where_expr ~alias:q.alias ~params e ]
+  in
+  (* aggregates return a single scalar row; ordering/paging don't apply *)
+  match q.select with
+  | Value (Call ("COUNT", _)) ->
+      String.concat " "
+        ([ "SELECT COUNT(*)::text FROM docs WHERE db = ? AND coll = ?" ] @ wh)
+  | _ -> compile_select ~params ~fetch ~offset ~wh q
+
 let parse s =
   let lexbuf = Lexing.from_string s in
   try Parser.query Lexer.token lexbuf with
@@ -272,4 +280,3 @@ let parse s =
       let pos = Lexing.lexeme_start_p lexbuf in
       error "parse error at character %d near '%s'" pos.pos_cnum
         (Lexing.lexeme lexbuf)
-
