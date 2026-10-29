@@ -6,6 +6,13 @@
 
 (generate_opam_files true)
 
+(maintainers "Morten Knaack <knaack@gmail.com>")
+
+(authors "Morten Knaack <knaack@gmail.com>")
+
+(source
+ (github mknaack/stratum))
+
 (package
  (name stratum)
  (synopsis
