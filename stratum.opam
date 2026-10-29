@@ -24,7 +24,8 @@ depends: [
   "uri"
   "menhir" {>= "20180523"}
   "ppx_expect" {with-test}
-  "ocamlformat" {with-test & = "0.28.1"}
+  "ocamlformat" {with-dev-setup & = "0.28.1"}
+  "ocaml-lsp-server" {with-dev-setup}
   "odoc" {with-doc}
 ]
 build: [
