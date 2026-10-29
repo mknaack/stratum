@@ -55,16 +55,16 @@ let%expect_test "parse error" =
 let%expect_test "patch_set: set + incr + remove" =
   let ops =
     [
-      { Compile.op = Compile.Set; path = "/city"; value = Some (`String "CPH") };
-      { Compile.op = Compile.Incr; path = "/n"; value = Some (`Int 2) };
-      { Compile.op = Compile.Remove; path = "/old"; value = None };
+      { Patch.op = Patch.Set; path = "/city"; value = Some (`String "CPH") };
+      { Patch.op = Patch.Incr; path = "/n"; value = Some (`Int 2) };
+      { Patch.op = Patch.Remove; path = "/old"; value = None };
     ]
   in
-  print_string (Compile.patch_set ops);
+  print_string (Patch.patch_set ops);
   [%expect
     {| (jsonb_set(jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true), '{"n"}', to_jsonb(COALESCE((jsonb_set(doc, '{"city"}', '"CPH"'::jsonb, true) #>> '{"n"}')::numeric, 0) + 2::numeric)) #- '{"old"}') |}]
 
 let%expect_test "compile_where: patch condition" =
   print_string
-    (Compile.compile_where "from c where c.n > 5 and IS_DEFINED(c.x)");
+    (Patch.compile_where "from c where c.n > 5 and IS_DEFINED(c.x)");
   [%expect {| ((doc #> '{"n"}' > '5'::jsonb) AND jsonb_exists(doc, '$.x')) |}]

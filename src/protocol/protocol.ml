@@ -3,6 +3,8 @@ open Ppx_yojson_conv_lib.Yojson_conv
 
 (* free-form embedded JSON (indexingPolicy, partitionKey): the ppx expects a
    yojson_of_<typename> per field type, so alias with an identity serializer *)
+module Batch_op = Batch_op
+
 type json = Yojson.Safe.t
 
 let yojson_of_json j = j
@@ -206,6 +208,22 @@ type batch_result = {
   resource_body : json; [@key "resourceBody"]
 }
 [@@deriving yojson_of]
+
+(* a single entry of a transactional-batch request's "operations" array *)
+type batch_operation = {
+  operation_type : Batch_op.t;
+  resource_body : json;
+  resource_id : string option;
+  if_match : string option;
+}
+
+let batch_operation_of_yojson j =
+  {
+    operation_type = Batch_op.t_of_yojson (member "operationType" j);
+    resource_body = member "resourceBody" j;
+    resource_id = member "resourceId" j |> to_string_option;
+    if_match = member "ifMatch" j |> to_string_option;
+  }
 
 (* "Fri, 23 Oct 2026 20:49:00 GMT" → epoch seconds for If-Modified-Since *)
 let months =

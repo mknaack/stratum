@@ -6,3 +6,12 @@
  (inline_tests)
  (preprocess
   (pps ppx_expect)))
+
+(library
+ (name test_protocol)
+ (wrapped false)
+ (modules test_protocol)
+ (libraries stratum.protocol yojson)
+ (inline_tests)
+ (preprocess
+  (pps ppx_expect)))
