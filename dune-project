@@ -38,5 +38,6 @@
   (ppx_expect :with-test)
   (ocamlformat
    (and
-    :with-test
-    (= 0.28.1)))))
+    :with-dev-setup
+    (= 0.28.1)))
+  (ocaml-lsp-server :with-dev-setup)))
