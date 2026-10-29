@@ -341,12 +341,12 @@ let change_feed pool db coll req =
 let patch_op_of_json o =
   let s = member "op" o |> to_string in
   let op =
-    match Query.Compile.patch_kind_of_string s with
+    match Query.Patch.patch_kind_of_string s with
     | Some k -> k
     | None -> Query.Compile.error "unsupported patch op %s" s
   in
   {
-    Query.Compile.op;
+    Query.Patch.op;
     path = member "path" o |> to_string;
     value = Protocol.member_opt "value" o;
   }
@@ -364,15 +364,14 @@ let patch_doc pool db coll id req body =
       | _ -> (
           try
             let set_sql =
-              let e = Query.Compile.patch_set ops in
-              Query.Compile.set_field e "_etag"
+              let e = Query.Patch.patch_set ops in
+              Query.Patch.set_field e "_etag"
                 (`String (Protocol.quote_etag (Protocol.etag ())))
-              |> fun e ->
-              Query.Compile.set_field e "_ts" (`Int (Protocol.now ()))
+              |> fun e -> Query.Patch.set_field e "_ts" (`Int (Protocol.now ()))
             in
             let cond_sql =
               Protocol.member_opt "condition" json
-              |> Option.map (fun c -> Query.Compile.compile_where (to_string c))
+              |> Option.map (fun c -> Query.Patch.compile_where (to_string c))
             in
             match Storage.doc_get pool ~db ~coll ~id with
             | Error e -> db_error e
@@ -392,37 +391,172 @@ let patch_doc pool db coll id req body =
 
 exception Batch_abort of (Cohttp_eio.Server.writer -> unit)
 
-type batch_op = Create | Upsert | Replace | Delete | Read | Patch
-
-let batch_op_of_string = function
-  | "Create" -> Some Create
-  | "Upsert" -> Some Upsert
-  | "Replace" -> Some Replace
-  | "Delete" -> Some Delete
-  | "Read" -> Some Read
-  | "Patch" -> Some Patch
-  | _ -> None
+let abort r = raise (Batch_abort r)
 
 (* x-ms-cosmos-batch-atomic: every op in one Postgres transaction; the whole
    batch rolls back on the first failure *)
+type batch_ctx = {
+  db : string;
+  coll : string;
+  db_rid : string;
+  coll_rid : string;
+  pk_of_body : Yojson.Safe.t -> string option;
+  pk0 : string option;
+}
+
+let batch_result ~code ?body e_tag =
+  Protocol.yojson_of_batch_result
+    {
+      status_code = code;
+      request_charge = 1.0;
+      e_tag;
+      resource_body = Option.value body ~default:`Null;
+    }
+
+let check_if_match conn (ctx : batch_ctx) (o : Protocol.batch_operation) id =
+  match o.if_match with
+  | None -> true
+  | Some m -> (
+      match Storage.doc_get_conn conn ~db:ctx.db ~coll:ctx.coll ~id with
+      | Ok (Some doc) ->
+          let cur =
+            doc |> member "_etag" |> to_string |> Protocol.unquote_etag
+          in
+          cur = Protocol.unquote_etag m
+      | _ -> false)
+
+let batch_create conn ctx ~upsert (o : Protocol.batch_operation) =
+  let id = member "id" o.resource_body |> to_string in
+  let doc =
+    Protocol.inject_doc_meta ~db_rid:ctx.db_rid ~coll_rid:ctx.coll_rid
+      ~doc_rid:(Protocol.rid ()) ~etag:(Protocol.etag ())
+      ~ts:(Protocol.now ()) o.resource_body
+  in
+  match
+    Storage.doc_create_conn conn ~db:ctx.db ~coll:ctx.coll ~id
+      ~pk:(ctx.pk_of_body o.resource_body) ~doc ~upsert
+  with
+  | Ok (`Ok doc) ->
+      batch_result ~code:201 ~body:doc
+        (Some (doc |> member "_etag" |> to_string))
+  | Ok `Conflict ->
+      abort (conflict (Printf.sprintf "Document %s already exists" id))
+  | Error e -> abort (db_error e)
+
+let batch_replace conn ctx (o : Protocol.batch_operation) =
+  let id =
+    match o.resource_id with
+    | Some id -> id
+    | None -> member "id" o.resource_body |> to_string
+  in
+  if not (check_if_match conn ctx o id) then
+    abort (precondition_failed "If-Match did not match")
+  else
+    let doc =
+      Protocol.inject_doc_meta ~db_rid:ctx.db_rid ~coll_rid:ctx.coll_rid
+        ~doc_rid:(Protocol.rid ()) ~etag:(Protocol.etag ())
+        ~ts:(Protocol.now ()) o.resource_body
+    in
+    match
+      Storage.doc_replace_conn conn ~db:ctx.db ~coll:ctx.coll ~id
+        ~pk:(ctx.pk_of_body o.resource_body) ~doc
+    with
+    | Ok (Some doc) ->
+        batch_result ~code:200 ~body:doc
+          (Some (doc |> member "_etag" |> to_string))
+    | Ok None ->
+        abort (not_found (Printf.sprintf "Document %s not found" id))
+    | Error e -> abort (db_error e)
+
+let batch_delete conn ctx (o : Protocol.batch_operation) =
+  let id =
+    match o.resource_id with
+    | Some id -> id
+    | None -> abort (bad_request "Delete needs resourceId")
+  in
+  if not (check_if_match conn ctx o id) then
+    abort (precondition_failed "If-Match did not match")
+  else
+    match
+      Storage.doc_delete_conn conn ~db:ctx.db ~coll:ctx.coll ~id
+        ~pk_header:ctx.pk0
+    with
+    | Ok true -> batch_result ~code:204 None
+    | Ok false ->
+        abort (not_found (Printf.sprintf "Document %s not found" id))
+    | Error e -> abort (db_error e)
+
+let batch_read conn ctx (o : Protocol.batch_operation) =
+  let id =
+    match o.resource_id with
+    | Some id -> id
+    | None -> abort (bad_request "Read needs resourceId")
+  in
+  match Storage.doc_get_conn conn ~db:ctx.db ~coll:ctx.coll ~id with
+  | Ok (Some doc) ->
+      batch_result ~code:200 ~body:doc
+        (Some (doc |> member "_etag" |> to_string))
+  | Ok None -> abort (not_found (Printf.sprintf "Document %s not found" id))
+  | Error e -> abort (db_error e)
+
+let batch_patch conn ctx (o : Protocol.batch_operation) =
+  let id =
+    match o.resource_id with
+    | Some id -> id
+    | None -> member "id" o.resource_body |> to_string
+  in
+  if not (check_if_match conn ctx o id) then
+    abort (precondition_failed "If-Match did not match")
+  else
+    let pops =
+      member "operations" o.resource_body |> to_list
+      |> List.map patch_op_of_json
+    in
+    let set_sql = Query.Patch.patch_set pops in
+    let cond_sql =
+      Protocol.member_opt "condition" o.resource_body
+      |> Option.map (fun c -> Query.Patch.compile_where (to_string c))
+    in
+    match
+      Storage.doc_patch_conn conn ~db:ctx.db ~coll:ctx.coll ~id
+        ~pk_header:ctx.pk0 ~set_sql ~cond_sql
+    with
+    | Ok (Some doc) ->
+        batch_result ~code:200 ~body:doc
+          (Some (doc |> member "_etag" |> to_string))
+    | Ok None -> abort (precondition_failed "PATCH condition evaluated to false")
+    | Error e -> abort (db_error e)
+
+let batch_run_op conn ctx (o : Protocol.batch_operation) =
+  match o.operation_type with
+  | Protocol.Batch_op.Create -> batch_create conn ctx ~upsert:false o
+  | Protocol.Batch_op.Upsert -> batch_create conn ctx ~upsert:true o
+  | Protocol.Batch_op.Replace -> batch_replace conn ctx o
+  | Protocol.Batch_op.Delete -> batch_delete conn ctx o
+  | Protocol.Batch_op.Read -> batch_read conn ctx o
+  | Protocol.Batch_op.Patch -> batch_patch conn ctx o
+
 let batch_docs pool db coll _req body =
   require_coll pool db coll @@ fun ~pk_path ~resource ->
   match parse_body body with
   | Error r -> r
   | Ok json -> (
-      let ops = member "operations" json |> to_list in
+      let ops =
+        member "operations" json |> to_list
+        |> List.map Protocol.batch_operation_of_yojson
+      in
       match ops with
       | [] -> bad_request "batch requires at least one operation"
       | _ -> (
-          let coll_rid = coll_rid_of resource in
           let pk_of_body b =
-            match pk_path with Some p -> Protocol.pk_of_doc p b | None -> None
+            match pk_path with
+            | Some p -> Protocol.pk_of_doc p b
+            | None -> None
           in
           (* every operation must target the same partition key *)
           let pks =
             List.filter_map
-              (fun o ->
-                Option.bind (Protocol.member_opt "resourceBody" o) pk_of_body)
+              (fun (o : Protocol.batch_operation) -> pk_of_body o.resource_body)
               ops
             |> List.sort_uniq String.compare
           in
@@ -430,159 +564,19 @@ let batch_docs pool db coll _req body =
           | _ :: _ :: _ ->
               bad_request "batch operations must share a partition key"
           | _ -> (
-              let pk0 = List.nth_opt pks 0 in
               match Storage.db_rid pool ~id:db with
               | Error e -> db_error e
               | Ok None -> not_found (Printf.sprintf "Database %s not found" db)
               | Ok (Some db_rid) -> (
-                  let abort r = raise (Batch_abort r) in
-                  let result ~code ?body e_tag =
-                    Protocol.yojson_of_batch_result
-                      {
-                        status_code = code;
-                        request_charge = 1.0;
-                        e_tag;
-                        resource_body = Option.value body ~default:`Null;
-                      }
-                  in
-                  let check_if_match conn o id =
-                    match
-                      Protocol.member_opt "ifMatch" o |> Option.map to_string
-                    with
-                    | None -> true
-                    | Some m -> (
-                        match Storage.doc_get_conn conn ~db ~coll ~id with
-                        | Ok (Some doc) ->
-                            let cur =
-                              doc |> member "_etag" |> to_string
-                              |> Protocol.unquote_etag
-                            in
-                            cur = Protocol.unquote_etag m
-                        | _ -> false)
-                  in
-                  let run_op conn o =
-                    let rbody = member "resourceBody" o in
-                    let rid_opt = member "resourceId" o |> to_string_option in
-                    match
-                      batch_op_of_string (member "operationType" o |> to_string)
-                    with
-                    | Some ((Create | Upsert) as ty) -> (
-                        let id = member "id" rbody |> to_string in
-                        let doc =
-                          Protocol.inject_doc_meta ~db_rid ~coll_rid
-                            ~doc_rid:(Protocol.rid ()) ~etag:(Protocol.etag ())
-                            ~ts:(Protocol.now ()) rbody
-                        in
-                        match
-                          Storage.doc_create_conn conn ~db ~coll ~id
-                            ~pk:(pk_of_body rbody) ~doc ~upsert:(ty = Upsert)
-                        with
-                        | Ok (`Ok doc) ->
-                            let et = doc |> member "_etag" |> to_string in
-                            result ~code:201 ~body:doc (Some et)
-                        | Ok `Conflict ->
-                            abort
-                              (conflict
-                                 (Printf.sprintf "Document %s already exists" id))
-                        | Error e -> abort (db_error e))
-                    | Some Replace -> (
-                        let id =
-                          match rid_opt with
-                          | Some id -> id
-                          | None -> member "id" rbody |> to_string
-                        in
-                        if not (check_if_match conn o id) then
-                          abort (precondition_failed "If-Match did not match")
-                        else
-                          let doc =
-                            Protocol.inject_doc_meta ~db_rid ~coll_rid
-                              ~doc_rid:(Protocol.rid ())
-                              ~etag:(Protocol.etag ()) ~ts:(Protocol.now ())
-                              rbody
-                          in
-                          match
-                            Storage.doc_replace_conn conn ~db ~coll ~id
-                              ~pk:(pk_of_body rbody) ~doc
-                          with
-                          | Ok (Some doc) ->
-                              let et = doc |> member "_etag" |> to_string in
-                              result ~code:200 ~body:doc (Some et)
-                          | Ok None ->
-                              abort
-                                (not_found
-                                   (Printf.sprintf "Document %s not found" id))
-                          | Error e -> abort (db_error e))
-                    | Some Delete -> (
-                        let id =
-                          match rid_opt with
-                          | Some id -> id
-                          | None ->
-                              abort (bad_request "Delete needs resourceId")
-                        in
-                        if not (check_if_match conn o id) then
-                          abort (precondition_failed "If-Match did not match")
-                        else
-                          match
-                            Storage.doc_delete_conn conn ~db ~coll ~id
-                              ~pk_header:pk0
-                          with
-                          | Ok true -> result ~code:204 None
-                          | Ok false ->
-                              abort
-                                (not_found
-                                   (Printf.sprintf "Document %s not found" id))
-                          | Error e -> abort (db_error e))
-                    | Some Read -> (
-                        let id =
-                          match rid_opt with
-                          | Some id -> id
-                          | None -> abort (bad_request "Read needs resourceId")
-                        in
-                        match Storage.doc_get_conn conn ~db ~coll ~id with
-                        | Ok (Some doc) ->
-                            let et = doc |> member "_etag" |> to_string in
-                            result ~code:200 ~body:doc (Some et)
-                        | Ok None ->
-                            abort
-                              (not_found
-                                 (Printf.sprintf "Document %s not found" id))
-                        | Error e -> abort (db_error e))
-                    | Some Patch -> (
-                        let id =
-                          match rid_opt with
-                          | Some id -> id
-                          | None -> member "id" rbody |> to_string
-                        in
-                        if not (check_if_match conn o id) then
-                          abort (precondition_failed "If-Match did not match")
-                        else
-                          let pops =
-                            member "operations" rbody |> to_list
-                            |> List.map patch_op_of_json
-                          in
-                          let set_sql = Query.Compile.patch_set pops in
-                          let cond_sql =
-                            Protocol.member_opt "condition" rbody
-                            |> Option.map (fun c ->
-                                Query.Compile.compile_where (to_string c))
-                          in
-                          match
-                            Storage.doc_patch_conn conn ~db ~coll ~id
-                              ~pk_header:pk0 ~set_sql ~cond_sql
-                          with
-                          | Ok (Some doc) ->
-                              let et = doc |> member "_etag" |> to_string in
-                              result ~code:200 ~body:doc (Some et)
-                          | Ok None ->
-                              abort
-                                (precondition_failed
-                                   "PATCH condition evaluated to false")
-                          | Error e -> abort (db_error e))
-                    | None ->
-                        abort
-                          (bad_request
-                             ("unsupported batch operation "
-                             ^ (member "operationType" o |> to_string)))
+                  let ctx =
+                    {
+                      db;
+                      coll;
+                      db_rid;
+                      coll_rid = coll_rid_of resource;
+                      pk_of_body;
+                      pk0 = List.nth_opt pks 0;
+                    }
                   in
                   try
                     match
@@ -592,9 +586,7 @@ let batch_docs pool db coll _req body =
                           match acc with
                           | Error _ as e -> e
                           | Ok acc -> (
-                              try
-                                let r = run_op conn o in
-                                Ok (r :: acc)
+                              try Ok (batch_run_op conn ctx o :: acc)
                               with Query.Compile.Error e ->
                                 abort (bad_request e)))
                         (Ok []) ops
