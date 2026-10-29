@@ -5,10 +5,12 @@
     "workspaceFolder": "/workspaces/stratum",
     "remoteUser": "opam",
     "customizations": {
-        "extensions": [
-            "ocamllabs.ocaml-platform",
-            "mutantdino.resourcemonitor"
-        ]
+        "vscode": {
+            "extensions": [
+                "ocamllabs.ocaml-platform",
+                "mutantdino.resourcemonitor"
+            ]
+        }
     },
     "mounts": [
         "source=${localEnv:HOME}/.gitconfig,target=/home/opam/.gitconfig,type=bind,consistency=cached"

@@ -3,8 +3,7 @@
 # pgx doesn't support SCRAM so trust auth is used for dev).
 services:
   app:
-    image: ocaml/opam:debian-12-ocaml-5.3
-    user: opam
+    image: ocaml/opam:debian-12-ocaml-5.5
     command: sleep infinity
     volumes:
       - ..:/workspaces/stratum:cached
